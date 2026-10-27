@@ -9,19 +9,31 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: [ANGLE_REVISION, args.gn, .github/workflows/build.yml]
+    paths: [ANGLE_REVISION, args.gn, .github/workflows/build.yml, tools/build_id.py, tools/test_build_id.py]
+  pull_request:
+    paths: [ANGLE_REVISION, args.gn, .github/workflows/build.yml, tools/build_id.py, tools/test_build_id.py]
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
-  group: build
+  group: build-${{ github.event_name == 'pull_request' && github.ref || 'release' }}
   cancel-in-progress: false
 
 jobs:
+  recipe-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tools -p 'test_*.py' -v
+
   windows-x64:
+    if: github.event_name != 'pull_request'
+    needs: recipe-tests
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     runs-on: windows-2022
     timeout-minutes: 300
     env:
@@ -33,10 +45,7 @@ jobs:
         id: rev
         shell: bash
         run: |
-          read -r branch sha < ANGLE_REVISION
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "tag=angle-${branch#chromium/}-${sha:0:10}" >> "$GITHUB_OUTPUT"
+          python tools/build_id.py >> "$GITHUB_OUTPUT"
 
       - name: Already released?
         id: have
@@ -109,9 +118,10 @@ jobs:
           cp "$angle/out/Release/libEGL.dll" "$angle/out/Release/libGLESv2.dll" "$pkg/"
           cp "$angle/LICENSE" "$pkg/LICENSE-ANGLE.txt"
           cp args.gn "$pkg/args.gn"
-          printf 'ANGLE %s %s\nhttps://chromium.googlesource.com/angle/angle/+/%s\n' \
-            "${{ steps.rev.outputs.branch }}" "${{ steps.rev.outputs.sha }}" "${{ steps.rev.outputs.sha }}" > "$pkg/REVISION.txt"
-          (cd "$pkg" && sha256sum libEGL.dll libGLESv2.dll > SHA256SUMS)
+          printf 'ANGLE %s %s\nhttps://chromium.googlesource.com/angle/angle/+/%s\nBuild recipe SHA-256: %s\n' \
+            "${{ steps.rev.outputs.branch }}" "${{ steps.rev.outputs.sha }}" "${{ steps.rev.outputs.sha }}" \
+            "${{ steps.rev.outputs.recipe_sha256 }}" > "$pkg/REVISION.txt"
+          (cd "$pkg" && sha256sum libEGL.dll libGLESv2.dll LICENSE-ANGLE.txt args.gn REVISION.txt > SHA256SUMS)
           (cd "$RUNNER_TEMP/pkg" && 7z a -tzip "${{ steps.rev.outputs.tag }}-windows-x64.zip" "${{ steps.rev.outputs.tag }}-windows-x64" >/dev/null)
           (cd "$RUNNER_TEMP/pkg" && sha256sum "${{ steps.rev.outputs.tag }}-windows-x64.zip" > "${{ steps.rev.outputs.tag }}-windows-x64.zip.sha256")
           cat "$pkg/SHA256SUMS" "$RUNNER_TEMP/pkg/${{ steps.rev.outputs.tag }}-windows-x64.zip.sha256"
